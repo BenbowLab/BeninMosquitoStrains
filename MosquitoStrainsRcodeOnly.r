@@ -1,0 +1,121 @@
+library(vegan)
+library(MASS)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(magrittr)
+library(scales)
+library(grid)
+library(reshape2)
+library(phyloseq)
+library(randomForest)
+library(knitr)
+library(ape)
+library(ggpubr)
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#000000","#CC79A7")
+theme_set(theme_bw(base_size = 18)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()))
+biom <-import_biom ( "C:\\Users\\Joe Receveur\\Documents\\Virtual Box\\BeninMozzie2018\\BMoz2018.biom", parseFunction = parse_taxonomy_greengenes)
+biom
+meta=sample_data(read.table("C:\\Users\\Joe Receveur\\Documents\\Virtual Box\\BeninMozzie2018\\Bmozmetadata1.27.18.txt",header=TRUE))
+sample_names(meta)=meta$SampleID
+
+
+physeq=merge_phyloseq(meta,biom)
+physeq
+
+
+GPr  = transform_sample_counts(physeq, function(x) x / sum(x) ) #transform samples based on relative abundance
+GPrPhylum=tax_glom(GPr, "Phylum")
+PhylumLevel = filter_taxa(GPrPhylum, function(x) mean(x) > 1e-3, TRUE) #filter out any taxa lower tha 0.1%
+GPrFamily=tax_glom(GPr,"Family")
+FamilyLevel = filter_taxa(GPrFamily, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower tha 1%
+GPrGenus=tax_glom(GPr,"Genus")
+GenusLevel = filter_taxa(GPrGenus, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower tha 1%
+
+df <- psmelt(PhylumLevel)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Phylum", "Strain"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+
+p <- ggbarplot(df, x = "Strain", y = "Abundance",add = c("mean_se"),#"mean_se"
+               color = "black", palette = "cbPalette", facet.by="Phylum",
+               line.color = "gray", line.size = 0.4, short.panel.labs = TRUE, p.adjust.method = "fdr", fill= "Strain") + stat_compare_means(aes(group = Strain), label = "..p.signif..",label.y = 7) 
+
+p+ theme(axis.text.x = element_text(angle = 45, hjust = 1))+ylab("Relative abundance (> 0.1%)")+ theme(legend.position="none")
+
+Means=compare_means(Abundance ~ Strain, data = df, 
+                    group.by = "Phylum", p.adjust.method = "fdr")
+#head(Means)
+keeps <- c("Phylum","group1","group2","p.format","p.adj","method","p.signif")
+keeps=Means[keeps]
+#keeps
+
+
+test3 <- list('Phylum'= keeps$Phylum,'group1'=keeps$group1,'group2'= keeps$group2 ,'p'=keeps$p.format,'p.adj'=keeps$p.adj,p.signif=keeps$p.signif,'Method'=keeps$method)
+test3= as.data.frame(test3)
+#test3
+FilteredResults<-test3[!(test3$p.adj>0.1),]            
+FilteredResults
+
+df <- psmelt(FamilyLevel)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Family", "Strain"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+
+p <- ggbarplot(df, x = "Strain", y = "Abundance",add = c("mean_se"),#"mean_se"
+               color = "black", palette = "cbPalette", facet.by="Family",
+               line.color = "gray", line.size = 0.4, short.panel.labs = TRUE, p.adjust.method = "bonferroni", fill= "Strain") + stat_compare_means(aes(group = Strain), label = "..p.signif..",label.y = 7) 
+
+p+ theme(axis.text.x = element_text(angle = 45, hjust = 1))+ylab("Relative abundance (> 1%)")+ theme(legend.position="none")
+
+Means=compare_means(Abundance ~ Strain, data = df, 
+                    group.by = "Family", p.adjust.method = "fdr")
+#head(Means)
+keeps <- c("Family","group1","group2","p.format","p.adj","method","p.signif")
+keeps=Means[keeps]
+#keeps
+
+
+test3 <- list('Family'= keeps$Family,'group1'=keeps$group1,'group2'= keeps$group2 ,'p'=keeps$p.format,'p.adj'=keeps$p.adj,p.signif=keeps$p.signif,'Method'=keeps$method)
+test3= as.data.frame(test3)
+#test3
+FilteredResults<-test3[!(test3$p.adj>0.1),]            
+FilteredResults
+
+ord=ordinate(physeq,"PCoA", "jaccard")
+ordplot=plot_ordination(physeq, ord,"samples", color="Strain")#+geom_point(size=4)+scale_colour_manual(values=cbPalette)+scale_fill_manual(values=cbPalette)
+ordplot+ stat_ellipse(type= "norm",geom = "polygon", alpha = 1/4, aes(fill = Strain))+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#+ theme(legend.justification=c(1,0), legend.position=c(1,0))
+
+GPdist=phyloseq::distance(physeq, "jaccard")
+MONMDS= ordinate(physeq, "NMDS",GPdist)
+
+adonis(GPdist ~ Strain, as(sample_data(physeq), "data.frame"))
+
+ForestData=physeq#Change this one so you dont have to rewrite all variables
+predictors=t(otu_table(ForestData))
+dim(predictors)
+response <- as.factor(sample_data(ForestData)$Strain)
+rf.data <- data.frame(response, predictors)
+MozzieForest <- randomForest(response~., data = rf.data, ntree = 1000)
+print(MozzieForest)#returns overall Random Forest results
+imp <- importance(MozzieForest)#all the steps that are imp or imp. are building a dataframe that contains info about the taxa used by the Random Forest testto classify treatment 
+imp <- data.frame(predictors = rownames(imp), imp)
+imp.sort <- arrange(imp, desc(MeanDecreaseGini))
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.20 <- imp.sort[1:20, ]
+ggplot(imp.20, aes(x = predictors, y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  coord_flip() +
+  ggtitle("Most important OTUs for classifying  samples\n by Strain")#\n in a string tells it to start a new line
+imp.20$MeanDecreaseGini
+otunames <- imp.20$predictors
+r <- rownames(tax_table(ForestData)) %in% otunames
+kable(tax_table(ForestData)[r, ])#returns a list of the most important predictors for Random Forest Classification
